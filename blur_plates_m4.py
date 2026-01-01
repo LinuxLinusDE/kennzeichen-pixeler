@@ -3,7 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
-from typing import Tuple
+from typing import Dict, Tuple
 
 import cv2
 import numpy as np
@@ -112,20 +112,66 @@ def get_fps(cap: cv2.VideoCapture) -> float:
     return fps
 
 
+def probe_bitrate(input_path: str) -> str:
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=bit_rate",
+            "-of",
+            "default=nk=1:nw=1",
+            input_path,
+        ]
+        out = subprocess.check_output(cmd, text=True).strip()
+        if out.isdigit():
+            return f"{int(out) // 1000}k"
+    except Exception:
+        pass
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=bit_rate",
+            "-of",
+            "default=nk=1:nw=1",
+            input_path,
+        ]
+        out = subprocess.check_output(cmd, text=True).strip()
+        if out.isdigit():
+            return f"{int(out) // 1000}k"
+    except Exception:
+        pass
+    return "50M"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Kennzeichen in Videos erkennen und verpixeln (Apple Silicon/MPS).")
-    p.add_argument("--input", required=True, help="Input-Video (MP4)")
-    p.add_argument("--output", required=True, help="Output-Video (MP4)")
-    p.add_argument("--weights", required=True, help="YOLOv8 .pt weights file")
+    p.add_argument("--input", help="Input-Video (MP4)")
+    p.add_argument("--output", help="Output-Video (MP4)")
+    p.add_argument("--weights", help="YOLOv8 .pt weights file")
     p.add_argument("--device", default="mps", help="Ultralytics device, z.B. mps oder cpu")
-    p.add_argument("--conf", type=float, default=0.35, help="Confidence Threshold")
-    p.add_argument("--imgsz", type=int, default=960, help="YOLO imgsz")
-    p.add_argument("--work_w", type=int, default=1280, help="Arbeitsbreite fuer Detektion (0 = Original)")
-    p.add_argument("--blocks", type=int, default=16, help="Pixel-Blockgroesse; kleiner = grober")
-    p.add_argument("--pad", type=int, default=20, help="Sicherheitsrand in Pixel")
+    p.add_argument("--conf", type=float, default=None, help="Confidence Threshold")
+    p.add_argument("--imgsz", type=int, default=None, help="YOLO imgsz")
+    p.add_argument("--work_w", type=int, default=None, help="Arbeitsbreite fuer Detektion (0 = Original)")
+    p.add_argument("--blocks", type=int, default=None, help="Pixel-Blockgroesse; kleiner = grober")
+    p.add_argument("--pad", type=int, default=None, help="Sicherheitsrand in Pixel")
     p.add_argument("--codec", choices=["hevc", "h264"], default="hevc", help="Video codec")
-    p.add_argument("--bitrate", default="12M", help="Video bitrate, z.B. 12M")
+    p.add_argument("--bitrate", default=None, help="Video bitrate, z.B. 50M oder auto")
+    p.add_argument(
+        "--preset",
+        choices=["fast", "balanced", "quality"],
+        default="balanced",
+        help="Preset fuer Speed/Qualitaet",
+    )
     p.add_argument("--force_sw", action="store_true", help="Software-Encoding erzwingen (libx265/libx264)")
+    p.add_argument("--debug_overlay", action="store_true", help="BBox-Overlay fuer Debug einzeichnen")
+    p.add_argument("--test_minutes", type=int, default=0, help="Nur die ersten N Minuten verarbeiten (0 = alles)")
     p.add_argument("--log_every", type=int, default=200, help="Log alle n Frames")
     p.add_argument(
         "--no_pixel_zone",
@@ -135,9 +181,91 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def prompt_value(label: str) -> str:
+    return input(f"{label}: ").strip()
+
+
+def resolve_paths(args: argparse.Namespace) -> None:
+    if args.input and args.output and args.weights:
+        return
+    if not sys.stdin.isatty():
+        return
+    print("Interaktiver Modus: Bitte fehlende Werte eingeben.")
+    if not args.input:
+        args.input = prompt_value("Input-Video (z.B. input.mp4)")
+    if not args.output:
+        args.output = prompt_value("Output-Video (z.B. output.mp4)")
+    if not args.weights:
+        args.weights = prompt_value("Weights-Datei (z.B. best.pt)")
+
+
+def auto_weights_path() -> str:
+    if os.path.isfile("best.pt"):
+        return "best.pt"
+    candidates = [f for f in os.listdir(".") if f.endswith(".pt") and os.path.isfile(f)]
+    if not candidates:
+        return ""
+    candidates.sort()
+    return candidates[0]
+
+
+def apply_preset(args: argparse.Namespace) -> None:
+    presets: Dict[str, Dict[str, object]] = {
+        "fast": {"conf": 0.3, "imgsz": 960, "work_w": 1280, "blocks": 16, "pad": 20, "bitrate": "auto"},
+        "balanced": {"conf": 0.25, "imgsz": 1280, "work_w": 1920, "blocks": 16, "pad": 20, "bitrate": "auto"},
+        "quality": {"conf": 0.2, "imgsz": 1600, "work_w": 0, "blocks": 16, "pad": 24, "bitrate": "auto"},
+    }
+    preset = presets.get(args.preset, presets["balanced"])
+    if args.conf is None:
+        args.conf = float(preset["conf"])
+    if args.imgsz is None:
+        args.imgsz = int(preset["imgsz"])
+    if args.work_w is None:
+        args.work_w = int(preset["work_w"])
+    if args.blocks is None:
+        args.blocks = int(preset["blocks"])
+    if args.pad is None:
+        args.pad = int(preset["pad"])
+    if args.bitrate is None:
+        args.bitrate = str(preset["bitrate"])
+
+
 def main() -> int:
+    if len(sys.argv) == 1:
+        print("Plater - Kennzeichen verpixeln (einfacher Start)")
+        print("Beispiel:")
+        print("  python blur_plates_m4.py --input input.mp4 --output output.mp4 --weights best.pt")
+        print("Kurz-Erklaerung:")
+        print("  Erkennt Kennzeichen im Video und verpixelt sie fuer Datenschutz.")
+        print("Wichtige Optionen (kurz):")
+        print("  --codec hevc|h264     (Standard: hevc)")
+        print("  --preset fast|balanced|quality")
+        print("  --bitrate auto        (passt Bitrate an das Original an)")
+        print("  --work_w 1920         (schneller, etwas weniger genau)")
+        print("  --imgsz 1280          (bessere Erkennung, langsamer)")
+        print("  --conf 0.25           (niedriger = mehr Treffer)")
+        print("  --blocks 16           (Pixelstaerke, kleiner = grober)")
+        print("  --pad 20              (Sicherheitsrand)")
+        print("  --no_pixel_zone 0,22,59,100  (HUD-Bereich aussparen)")
+        print("  --test_minutes 2      (nur erste 2 Minuten verarbeiten)")
+        print("  --debug_overlay       (BBox-Overlay fuer Debug)")
+        print("  --force_sw            (Software-Encoding erzwingen)")
+        print("Weitere Hilfe:")
+        print("  python blur_plates_m4.py -h")
+        return 0
     args = parse_args()
+    resolve_paths(args)
+    if not args.weights:
+        args.weights = auto_weights_path()
+    if not args.weights:
+        print("Weights nicht gefunden. Bitte --weights angeben.", file=sys.stderr)
+        return 2
+    apply_preset(args)
     exit_code = 0
+
+    if not args.input or not args.output:
+        print("Input/Output fehlt. Bitte --input und --output angeben.", file=sys.stderr)
+        return 2
 
     if not os.path.isfile(args.weights):
         print(f"Weights nicht gefunden: {args.weights}", file=sys.stderr)
@@ -145,6 +273,9 @@ def main() -> int:
 
     if not shutil_which("ffmpeg"):
         print("ffmpeg nicht gefunden. Bitte installieren: brew install ffmpeg", file=sys.stderr)
+        return 2
+    if (args.bitrate or "").lower() == "auto" and not shutil_which("ffprobe"):
+        print("ffprobe nicht gefunden. Bitte ffmpeg komplett installieren: brew install ffmpeg", file=sys.stderr)
         return 2
 
     try:
@@ -170,10 +301,16 @@ def main() -> int:
         return 2
 
     use_sw = args.force_sw or os.environ.get("FORCE_SW", "") == "1"
-    cmd = build_ffmpeg_cmd(args.output, args.input, w, h, fps, args.codec, args.bitrate, use_sw)
+    bitrate = args.bitrate
+    if isinstance(bitrate, str) and bitrate.lower() == "auto":
+        bitrate = probe_bitrate(args.input)
+    cmd = build_ffmpeg_cmd(args.output, args.input, w, h, fps, args.codec, bitrate, use_sw)
 
     proc = None
     frame_idx = 0
+    max_frames = 0
+    if args.test_minutes and args.test_minutes > 0:
+        max_frames = int(fps * 60 * args.test_minutes)
     try:
         nx1p, nx2p, ny1p, ny2p = [float(v) for v in args.no_pixel_zone.split(",")]
         no_pixel_enabled = True
@@ -238,6 +375,8 @@ def main() -> int:
                     if nz is not None and boxes_overlap((x1, y1, x2, y2), nz):
                         continue
                     pixelate_roi(frame, x1, y1, x2, y2, args.blocks)
+                    if args.debug_overlay:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
             if proc.stdin is None:
                 raise RuntimeError("ffmpeg stdin nicht verfuegbar")
@@ -246,6 +385,8 @@ def main() -> int:
             frame_idx += 1
             if args.log_every > 0 and frame_idx % args.log_every == 0:
                 print(f"Processed frames: {frame_idx}")
+            if max_frames and frame_idx >= max_frames:
+                break
 
     except BrokenPipeError:
         print("ffmpeg Pipe abgebrochen", file=sys.stderr)
