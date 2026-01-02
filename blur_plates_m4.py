@@ -3,11 +3,23 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from typing import Dict, Tuple
 
-import cv2
-import numpy as np
-from ultralytics import YOLO
+try:
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO
+except Exception as e:
+    print("Fehlende Abhaengigkeiten. Bitte Umgebung einrichten und Pakete installieren:")
+    print("  python3 -m venv .venv")
+    print("  source .venv/bin/activate")
+    print("  pip install -U pip")
+    print("  pip install -r requirements.txt")
+    print("")
+    print("Danach starten mit:")
+    print("  python blur_plates_m4.py --input input.mp4 --output output.mp4 --weights best.pt")
+    raise SystemExit(2) from e
 
 
 def apply_pad(x1: int, y1: int, x2: int, y2: int, pad: int, w: int, h: int) -> Tuple[int, int, int, int]:
@@ -178,6 +190,11 @@ def parse_args() -> argparse.Namespace:
         default="0,22,59,100",
         help="No-Pixel-Zone in Prozent als x1,x2,y1,y2 (z.B. 0,22,59,100)",
     )
+    p.add_argument(
+        "--no_pixel_zone2",
+        default="78,100,59,100",
+        help="Zweite No-Pixel-Zone in Prozent (z.B. 78,100,59,100)",
+    )
     return p.parse_args()
 
 
@@ -233,6 +250,11 @@ def apply_preset(args: argparse.Namespace) -> None:
 def main() -> int:
     if len(sys.argv) == 1:
         print("Plater - Kennzeichen verpixeln (einfacher Start)")
+        print("Vorbereitung (einmalig):")
+        print("  python3 -m venv .venv")
+        print("  source .venv/bin/activate")
+        print("  pip install -U pip")
+        print("  pip install -r requirements.txt")
         print("Beispiel:")
         print("  python blur_plates_m4.py --input input.mp4 --output output.mp4 --weights best.pt")
         print("Kurz-Erklaerung:")
@@ -247,6 +269,7 @@ def main() -> int:
         print("  --blocks 16           (Pixelstaerke, kleiner = grober)")
         print("  --pad 20              (Sicherheitsrand)")
         print("  --no_pixel_zone 0,22,59,100  (HUD-Bereich aussparen)")
+        print("  --no_pixel_zone2 78,100,59,100 (HUD-Bereich rechts aussparen)")
         print("  --test_minutes 2      (nur erste 2 Minuten verarbeiten)")
         print("  --debug_overlay       (BBox-Overlay fuer Debug)")
         print("  --force_sw            (Software-Encoding erzwingen)")
@@ -287,6 +310,7 @@ def main() -> int:
     fps = get_fps(cap)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if w <= 0 or h <= 0:
         print("Konnte Videoauflosung nicht ermitteln.", file=sys.stderr)
@@ -311,12 +335,16 @@ def main() -> int:
     max_frames = 0
     if args.test_minutes and args.test_minutes > 0:
         max_frames = int(fps * 60 * args.test_minutes)
-    try:
-        nx1p, nx2p, ny1p, ny2p = [float(v) for v in args.no_pixel_zone.split(",")]
-        no_pixel_enabled = True
-    except Exception:
-        nx1p = nx2p = ny1p = ny2p = 0.0
-        no_pixel_enabled = False
+    if max_frames and total_frames > 0:
+        total_frames = min(total_frames, max_frames)
+    start_time = time.time()
+    zones = []
+    for zone_arg in [args.no_pixel_zone, args.no_pixel_zone2]:
+        try:
+            zx1p, zx2p, zy1p, zy2p = [float(v) for v in zone_arg.split(",")]
+            zones.append((zx1p, zy1p, zx2p, zy2p))
+        except Exception:
+            continue
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         while True:
@@ -331,15 +359,16 @@ def main() -> int:
                 new_h = int(h * scale)
                 det_frame = cv2.resize(frame, (args.work_w, new_h), interpolation=cv2.INTER_AREA)
 
-            if no_pixel_enabled:
-                nz = (
-                    int(w * (nx1p / 100.0)),
-                    int(h * (ny1p / 100.0)),
-                    int(w * (nx2p / 100.0)),
-                    int(h * (ny2p / 100.0)),
+            nz_list = []
+            for zx1p, zy1p, zx2p, zy2p in zones:
+                nz_list.append(
+                    (
+                        int(w * (zx1p / 100.0)),
+                        int(h * (zy1p / 100.0)),
+                        int(w * (zx2p / 100.0)),
+                        int(h * (zy2p / 100.0)),
+                    )
                 )
-            else:
-                nz = None
 
             try:
                 results = model.predict(
@@ -372,7 +401,7 @@ def main() -> int:
                         x2 = int(x2 / scale)
                         y2 = int(y2 / scale)
                     x1, y1, x2, y2 = apply_pad(x1, y1, x2, y2, args.pad, w, h)
-                    if nz is not None and boxes_overlap((x1, y1, x2, y2), nz):
+                    if nz_list and any(boxes_overlap((x1, y1, x2, y2), nz) for nz in nz_list):
                         continue
                     pixelate_roi(frame, x1, y1, x2, y2, args.blocks)
                     if args.debug_overlay:
@@ -384,7 +413,17 @@ def main() -> int:
 
             frame_idx += 1
             if args.log_every > 0 and frame_idx % args.log_every == 0:
-                print(f"Processed frames: {frame_idx}")
+                elapsed = time.time() - start_time
+                fps_eff = frame_idx / elapsed if elapsed > 0 else 0.0
+                if total_frames > 0 and fps_eff > 0:
+                    remaining = max(total_frames - frame_idx, 0)
+                    eta_sec = int(remaining / fps_eff)
+                    eta_min = eta_sec // 60
+                    eta_rem = eta_sec % 60
+                    pct = (frame_idx / total_frames) * 100.0
+                    print(f"Processed frames: {frame_idx} | {pct:.1f}% | ETA {eta_min}m {eta_rem}s")
+                else:
+                    print(f"Processed frames: {frame_idx}")
             if max_frames and frame_idx >= max_frames:
                 break
 
