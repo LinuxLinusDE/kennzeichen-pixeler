@@ -28,9 +28,14 @@ source .venv/bin/activate
 python blur_plates_m4.py --input input.mp4 --output output.mp4 --weights best.pt
 ```
 
+Wenn dir beim Start Fehlermeldungen wie `ModuleNotFoundError: No module named 'cv2'` erscheinen, fehlt die Umgebung. Dann nutze die Setup-Schritte oben.
+
+Wenn du ohne Parameter startest, zeigt das Programm eine kurze, leicht verstaendliche Hilfe an.
+
 ## Woher bekomme ich `best.pt`?
 - Trainiere ein eigenes YOLOv8-Kennzeichenmodell und exportiere es als `.pt`.
 - Nutze ein bestehendes Kennzeichen-Detektionsmodell von einem vertrauenswuerdigen Anbieter (achte auf Lizenz und Datenschutz).
+- Beispiel: Ein passendes Modell gibt es z. B. hier: https://huggingface.co/Koushim/yolov8-license-plate-detection/tree/main
 - Wichtig: Das Modell muss Kennzeichen als Objekte erkennen (keine OCR noetig).
 
 ## Beispiele
@@ -42,14 +47,14 @@ python blur_plates_m4.py \
   --weights /path/to/plate_model.pt
 ```
 
-H264 kompatibler Output (laeuft fast ueberall):
+H264 kompatibler Output (laeuft fast ueberall, empfehle 50M fuer beste Qualitaet):
 ```bash
 python blur_plates_m4.py \
   --input input.mp4 \
   --output output_h264.mp4 \
   --weights /path/to/plate_model.pt \
   --codec h264 \
-  --bitrate 20M
+  --bitrate 50M
 ```
 
 Software-Encoding erzwingen (wenn Hardware-Encoding zickt):
@@ -70,20 +75,35 @@ python blur_plates_m4.py \
   --work_w 1280
 ```
 
+Preset fuer hohe Qualitaet (langsamer, bessere Erkennung):
+```bash
+python blur_plates_m4.py \
+  --input input.mp4 \
+  --output output_quality.mp4 \
+  --weights /path/to/plate_model.pt \
+  --preset quality
+```
+
 ## Wichtige Parameter
 - `work_w`: Arbeitsbreite fuer Detektion (z.B. 1280 oder 1920). 0 = Originalaufloesung.
-- `imgsz`: YOLO Inferenzgroesse.
-- `conf`: Confidence Threshold (hoeher = weniger Treffer).
+- `imgsz`: YOLO Inferenzgroesse (groesser = bessere Erkennung, aber langsamer).
+- `conf`: Confidence Threshold (niedriger = mehr Treffer).
 - `blocks`: Pixelblock-Groesse (kleiner = grober, staerkerer Effekt).
 - `pad`: Sicherheitsrand in Pixeln um jede Box.
 - `no_pixel_zone`: No-Pixel-Zone in Prozent als `x1,x2,y1,y2` (Default `0,22,59,100` fuer HUD unten links).
+- `no_pixel_zone2`: Zweite No-Pixel-Zone (Default `78,100,59,100` fuer HUD unten rechts).
 - `force_sw`: Software-Encoding erzwingen (nuetzlich, wenn VideoToolbox zickt).
+- `test_minutes`: Nur die ersten N Minuten verarbeiten (0 = alles).
+- `preset`: `fast`, `balanced`, `quality` fuer einfache Speed/Qualitaets-Wahl.
+- `debug_overlay`: Zeichnet Boxen zur Kontrolle ins Video.
+- `bitrate`: Standard ist `auto` (uebernimmt Bitrate vom Input), alternativ z. B. `50M`.
 
 ## Bedienung in einfachen Worten
 1) Lege dein Video (z. B. `input.mp4`) und die Gewichte (z. B. `best.pt`) in den Projektordner.
 2) Oeffne ein Terminal im Projektordner.
 3) Starte das Programm wie im Schnellstart gezeigt.
 4) Danach findest du die Ausgabe als `output.mp4` im selben Ordner.
+Tipp: Wenn `best.pt` im Ordner liegt und du `--weights` vergisst, wird es automatisch genutzt.
 
 ## FAQ
 Wie sicher ist die Verpixelung?
