@@ -183,17 +183,18 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--force_sw", action="store_true", help="Software-Encoding erzwingen (libx265/libx264)")
     p.add_argument("--debug_overlay", action="store_true", help="BBox-Overlay fuer Debug einzeichnen")
+    p.add_argument("--debug_zones", action="store_true", help="No-Pixel-Zonen rot einzeichnen")
     p.add_argument("--test_minutes", type=int, default=0, help="Nur die ersten N Minuten verarbeiten (0 = alles)")
     p.add_argument("--log_every", type=int, default=200, help="Log alle n Frames")
     p.add_argument(
         "--no_pixel_zone",
-        default="0,22,59,100",
-        help="No-Pixel-Zone in Prozent als x1,x2,y1,y2 (z.B. 0,22,59,100)",
+        default="0,20,63,100",
+        help="No-Pixel-Zone in Prozent als x1,x2,y1,y2 (z.B. 0,20,63,100). Leer = aus",
     )
     p.add_argument(
         "--no_pixel_zone2",
-        default="78,100,59,100",
-        help="Zweite No-Pixel-Zone in Prozent (z.B. 78,100,59,100)",
+        default="",
+        help="Zweite No-Pixel-Zone in Prozent (z.B. 78,100,59,100). Leer = aus",
     )
     return p.parse_args()
 
@@ -247,6 +248,18 @@ def apply_preset(args: argparse.Namespace) -> None:
         args.bitrate = str(preset["bitrate"])
 
 
+def build_output_path(args: argparse.Namespace) -> str:
+    in_dir = os.path.dirname(args.input)
+    in_base = os.path.splitext(os.path.basename(args.input))[0]
+    weights_base = "noweights"
+    if args.weights:
+        weights_base = os.path.splitext(os.path.basename(args.weights))[0]
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    test_tag = f"_test{args.test_minutes}m" if args.test_minutes else ""
+    fname = f"{in_base}_plates_{weights_base}_{args.preset}_{args.codec}{test_tag}_{ts}.mp4"
+    return os.path.join(in_dir, fname)
+
+
 def main() -> int:
     if len(sys.argv) == 1:
         print("Plater - Kennzeichen verpixeln (einfacher Start)")
@@ -268,10 +281,11 @@ def main() -> int:
         print("  --conf 0.25           (niedriger = mehr Treffer)")
         print("  --blocks 16           (Pixelstaerke, kleiner = grober)")
         print("  --pad 20              (Sicherheitsrand)")
-        print("  --no_pixel_zone 0,22,59,100  (HUD-Bereich aussparen)")
-        print("  --no_pixel_zone2 78,100,59,100 (HUD-Bereich rechts aussparen)")
+        print("  --no_pixel_zone 0,20,63,100  (HUD-Bereich aussparen)")
+        print("  --no_pixel_zone2 78,100,59,100 (optional, HUD-Bereich rechts)")
         print("  --test_minutes 2      (nur erste 2 Minuten verarbeiten)")
         print("  --debug_overlay       (BBox-Overlay fuer Debug)")
+        print("  --debug_zones         (No-Pixel-Zonen rot einzeichnen)")
         print("  --force_sw            (Software-Encoding erzwingen)")
         print("Weitere Hilfe:")
         print("  python blur_plates_m4.py -h")
@@ -286,9 +300,11 @@ def main() -> int:
     apply_preset(args)
     exit_code = 0
 
-    if not args.input or not args.output:
-        print("Input/Output fehlt. Bitte --input und --output angeben.", file=sys.stderr)
+    if not args.input:
+        print("Input fehlt. Bitte --input angeben.", file=sys.stderr)
         return 2
+    if not args.output:
+        args.output = build_output_path(args)
 
     if not os.path.isfile(args.weights):
         print(f"Weights nicht gefunden: {args.weights}", file=sys.stderr)
@@ -328,6 +344,7 @@ def main() -> int:
     bitrate = args.bitrate
     if isinstance(bitrate, str) and bitrate.lower() == "auto":
         bitrate = probe_bitrate(args.input)
+    bitrate_used = bitrate
     cmd = build_ffmpeg_cmd(args.output, args.input, w, h, fps, args.codec, bitrate, use_sw)
 
     proc = None
@@ -369,6 +386,9 @@ def main() -> int:
                         int(h * (zy2p / 100.0)),
                     )
                 )
+            if args.debug_zones and nz_list:
+                for zx1, zy1, zx2, zy2 in nz_list:
+                    cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), (0, 0, 255), 3)
 
             try:
                 results = model.predict(
@@ -452,6 +472,22 @@ def main() -> int:
             except Exception:
                 pass
 
+    if exit_code == 0:
+        elapsed = time.time() - start_time
+        proc_min = int(elapsed // 60)
+        proc_sec = int(elapsed % 60)
+        dur_sec = int(frame_idx / fps) if fps > 0 else 0
+        dur_min = dur_sec // 60
+        dur_rem = dur_sec % 60
+        print("")
+        print("Fertig.")
+        print(f"Output: {args.output}")
+        print(f"Input: {args.input}")
+        print(f"Aufloesung: {w}x{h} @ {fps:.2f} fps")
+        print(f"Verarbeitet: {frame_idx} Frames (~{dur_min}m {dur_rem}s)")
+        print(f"Bitrate: {bitrate_used}")
+        print(f"Encoder: {args.codec}{' (SW)' if use_sw else ' (HW)'}")
+        print(f"Dauer: {proc_min}m {proc_sec}s")
     return exit_code
 
 
